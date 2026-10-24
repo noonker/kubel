@@ -109,6 +109,8 @@
 (require 'eshell)
 (require 'dired)
 (require 'json)
+(require 'term)
+(require 'ansi-color)
 
 (defgroup kubel nil "Customisation group for kubel."
   :group 'extensions)
@@ -202,7 +204,12 @@
     ("NetworkUnavailable" . kubel-status-network-unavailable)
     ("Completed" . kubel-status-completed)
     ("CrashLoopBackOff" . kubel-status-crash-loop-backoff)
-    ("Terminating" . kubel-status-terminating))
+    ("Terminating" . kubel-status-terminating)
+    ("Succeeded" . kubel-status-completed)
+    ("Failed" . kubel-status-error)
+    ("OK" . kubel-status-healthy)
+    ("deployed" . kubel-status-healthy)
+    ("failed" . kubel-status-error))
   "Associative list of status to face."
   :type '(alist :key-type string
                 :value-type face)
@@ -272,6 +279,12 @@ This is used by `kubel-kill-buffer'."
   "Default namespace for kubel to use. Change if you have no resources in
 `default' namespace."
   :type 'string
+  :group 'kubel)
+
+(defcustom kubel-diff-before-apply t
+  "Non-nil means show `kubectl diff' and confirm before applying a resource.
+This is used by `kubel-apply'."
+  :type 'boolean
   :group 'kubel)
 
 (defun kubel--append-to-process-buffer (str)
@@ -375,6 +388,15 @@ If SILENCE-WARNINGS is non-nil, stderr output is not displayed."
 (defvar-local kubel--selected-items '())
 
 (defvar-local kubel--kubernetes-resources-list-cached nil)
+
+(defvar-local kubel--buffer-prefix "kubel"
+  "Prefix of the kubel buffer name.
+Modes derived from `kubel-mode' set this so their buffers don't clash
+with plain kubel buffers.")
+
+(defvar-local kubel--populate-function #'kubel--populate-list
+  "Function returning the tabulated list format and entries for this buffer.
+See `kubel--populate-list' for the expected return value.")
 
 (defvar-local kubel--parent-buffer nil
   "The buffer that spawned this kubel buffer.
@@ -508,13 +530,14 @@ If MAX is the end of the line, dynamically adjust."
   "Return the width of a specific COLNUM in ENTRYLIST."
   (seq-max (mapcar (lambda (x) (length (nth colnum x) )) entrylist)))
 
-(defun kubel--buffer-name-from-parameters (context namespace resource)
-  "Return a preconfigured kubel buffer name."
-  (concat (format "*kubel:%s:%s:%s*" context namespace resource)))
+(defun kubel--buffer-name-from-parameters (context namespace resource &optional prefix)
+  "Return a preconfigured kubel buffer name.
+PREFIX defaults to \"kubel\"."
+  (concat (format "*%s:%s:%s:%s*" (or prefix "kubel") context namespace resource)))
 
 (defun kubel--buffer-name ()
   "Return kubel buffer name."
-  (concat (kubel--buffer-name-from-parameters kubel-context kubel-namespace kubel-resource)
+  (concat (kubel--buffer-name-from-parameters kubel-context kubel-namespace kubel-resource kubel--buffer-prefix)
           (unless (equal kubel-selector "")
             (format " (%s)" kubel-selector))))
 
@@ -569,7 +592,11 @@ CALLBACK is called when process completes successfully."
       (if (eq 0 exit-status)
           (progn
             (kubel--clear-header-error)
-            (when callback (funcall callback)))
+            (when callback
+              (if (buffer-live-p (process-buffer process))
+                  (with-current-buffer (process-buffer process)
+                    (funcall callback))
+                (funcall callback))))
         (kubel--handle-stderr (with-current-buffer error-buffer
                                 (buffer-string))))
       ;; Clean up error buffer
@@ -583,26 +610,79 @@ PROCESS-NAME is an identifier for the process.  Default to \"kubel-command\".
 ARGS is a list of arguments.
 CALLBACK is a function that will be executed when the command completes.
 READONLY if non-nil, buffer will be in `view-mode'."
+  (kubel--exec-program-async process-name kubel-kubectl (kubel--get-context-namespace)
+                             args readonly callback))
+
+(defun kubel--exec-program-async (process-name program global-args args &optional readonly callback filter)
+  "Run PROGRAM with GLOBAL-ARGS and ARGS asynchronously, output in a buffer.
+
+PROCESS-NAME is an identifier for the process.  Default to \"kubel-command\".
+GLOBAL-ARGS is a list of arguments such as context and namespace flags.
+ARGS is a list of arguments, used to name the output buffer.
+CALLBACK is a function that will be executed when the command completes.
+READONLY if non-nil, buffer will be in `view-mode'.
+FILTER, if non-nil, is the process filter.
+Return the process."
   (when (equal process-name "")
     (setq process-name "kubel-command"))
-  (let ((buffer-name (format "*kubel-resource:%s:%s:%s*" kubel-context kubel-namespace (string-join args "_")))
+  (let ((buffer-name (format "*kubel-resource:%s:%s:%s*" kubel-context kubel-namespace
+                             (string-join (if (equal program kubel-kubectl)
+                                              args
+                                            (cons (file-name-nondirectory program) args))
+                                          "_")))
         (error-buffer (kubel--process-error-buffer process-name))
-        (cmd (append (list kubel-kubectl) (kubel--get-context-namespace) args)))
+        (cmd (append (list program) global-args args)))
     (when (get-buffer buffer-name)
       (kill-buffer buffer-name))
     (when (get-buffer error-buffer)
       (kill-buffer error-buffer))
     (kubel--log-command process-name cmd)
-    (make-process :name process-name
-                  :buffer buffer-name
-                  :sentinel (kubel--sentinel callback)
-                  :file-handler t
-                  :stderr (get-buffer-create error-buffer)
-                  :command cmd)
-    (pop-to-buffer-same-window buffer-name)
-    (if readonly
-        (with-current-buffer buffer-name
-          (view-mode)))))
+    (let ((process (make-process :name process-name
+                                 :buffer buffer-name
+                                 :sentinel (kubel--sentinel callback)
+                                 :file-handler t
+                                 :stderr (get-buffer-create error-buffer)
+                                 :command cmd))
+          (stderr-process (get-buffer-process error-buffer)))
+      ;; The stderr pipe dies with the command, don't ask about it when
+      ;; killing the error buffer of a streaming command such as logs -f.
+      (when stderr-process
+        (set-process-query-on-exit-flag stderr-process nil))
+      (when filter
+        (set-process-filter process filter))
+      (pop-to-buffer-same-window buffer-name)
+      (if readonly
+          (with-current-buffer buffer-name
+            (view-mode)))
+      process)))
+
+(defun kubel--ansi-color-filter (process output)
+  "Process filter inserting OUTPUT of PROCESS with its ANSI colors as faces."
+  (when (buffer-live-p (process-buffer process))
+    (with-current-buffer (process-buffer process)
+      (let ((inhibit-read-only t)
+            (moving (= (point) (process-mark process))))
+        (save-excursion
+          (goto-char (process-mark process))
+          (insert (ansi-color-apply output))
+          (set-marker (process-mark process) (point)))
+        (when moving (goto-char (process-mark process)))))))
+
+(defun kubel--run-in-term (name program args)
+  "Run PROGRAM with ARGS in a `term' buffer named NAME and switch to it.
+Used for interactive commands such as consoles and dashboards."
+  (kubel--log-command name (cons program args))
+  (let ((buf (apply #'make-term name program nil args)))
+    (with-current-buffer buf
+      (term-mode)
+      (term-char-mode))
+    (pop-to-buffer-same-window buf)))
+
+(defun kubel--marked-or-current-items ()
+  "Return the marked items, or a list of the item under cursor."
+  (if (kubel--items-selected-p)
+      kubel--selected-items
+    (list (kubel--get-resource-under-cursor))))
 
 (defun kubel--get-resource-under-cursor ()
   "Utility function to get the name of the resource under the cursor.
@@ -693,7 +773,7 @@ NAME is the resource name."
   (let* ((typename (format "%s/%s" type name))
          (revision (car (split-string (kubel--select-rollout typename))))
          (process-name (format "kubel - rollout - %s - %s" typename revision))
-         (callback (goto-char (point-min))))
+         (callback (lambda () (goto-char (point-min)))))
     (kubel--exec-async process-name
                  (list "rollout" "history" typename (format "--revision=%s" revision)) nil callback)))
 
@@ -753,7 +833,7 @@ If no parent buffer exists, call `quit-window'."
   "Kill all kubel-related buffers."
   (interactive)
   (dolist (buf (buffer-list))
-    (when (string-match-p "^\\*kubel\\(-resource\\)?:" (buffer-name buf))
+    (when (string-match-p "^\\*kubel\\(-[a-z]+\\)?:" (buffer-name buf))
       (kill-buffer buf))))
 
 (defvar kubel-yaml-editing-mode-map
@@ -773,23 +853,56 @@ Allows simple apply of the changes made.
 \\{kubel-yaml-editing-mode-map}")
 
 (defun kubel-apply ()
-  "Save the current buffer to a temp file and try to kubectl apply it."
+  "Save the current buffer to a temp file and try to kubectl apply it.
+If `kubel-diff-before-apply' is non-nil, show the diff with the live
+resource first."
   (interactive)
-  (setq dir-prefix (or
-                    (when (tramp-tramp-file-p default-directory)
-                      (with-parsed-tramp-file-name default-directory nil
-                        (format "/%s%s:%s:" (or hop "") method (if user (concat user "@" host) host))))
-                    ""))
-  (let* ((filename-without-tramp-prefix (format "/tmp/kubel/%s-%s.yaml"
+  (let* ((dir-prefix (or
+                      (when (tramp-tramp-file-p default-directory)
+                        (with-parsed-tramp-file-name default-directory nil
+                          (format "/%s%s:%s:" (or hop "") method (if user (concat user "@" host) host))))
+                      ""))
+         (filename-without-tramp-prefix (format "/tmp/kubel/%s-%s.yaml"
                                                 (replace-regexp-in-string "/" "_"
                                                                           (replace-regexp-in-string "\*\\| " "" (buffer-name)))
                                                 (floor (float-time))))
          (filename (format "%s%s" dir-prefix filename-without-tramp-prefix)))
-    (when (y-or-n-p "Apply the changes? ")
-      (unless  (file-exists-p (format "%s/tmp/kubel" dir-prefix))
-        (make-directory (format "%s/tmp/kubel" dir-prefix) t))
-      (write-region (point-min) (point-max) filename)
+    (unless  (file-exists-p (format "%s/tmp/kubel" dir-prefix))
+      (make-directory (format "%s/tmp/kubel" dir-prefix) t))
+    (write-region (point-min) (point-max) filename)
+    (when (kubel--confirm-apply filename-without-tramp-prefix)
       (kubel--exec-async (format "kubectl - apply - %s" filename) (list "apply" "-f" filename-without-tramp-prefix) nil (lambda () (message "Applied %s" filename))))))
+
+(defun kubel--confirm-apply (file)
+  "Ask to apply FILE, showing its `kubectl diff' first.
+The diff is skipped if `kubel-diff-before-apply' is nil.  Return nil
+without asking if there is nothing to apply."
+  (if (not kubel-diff-before-apply)
+      (y-or-n-p "Apply the changes? ")
+    (let* ((cmd (format "%s diff -f %s" (kubel--get-command-prefix) (shell-quote-argument file)))
+           (buf (get-buffer-create "*kubel-diff*"))
+           (exit-code (progn
+                        (kubel--log-command "kubectl-diff" cmd)
+                        (with-current-buffer buf
+                          (let ((inhibit-read-only t))
+                            (erase-buffer)
+                            ;; kubectl diff exits with 1 when there are differences
+                            (process-file-shell-command cmd nil (list t nil)))))))
+      (cond
+       ((eq exit-code 0)
+        (message "No changes to apply")
+        nil)
+       ((eq exit-code 1)
+        (with-current-buffer buf
+          (diff-mode)
+          (goto-char (point-min)))
+        (let ((win (display-buffer buf)))
+          (unwind-protect
+              (y-or-n-p "Apply the changes? ")
+            (when (window-live-p win)
+              (quit-restore-window win)))))
+       (t
+        (y-or-n-p (format "kubectl diff failed (exit %s), apply anyway? " exit-code)))))))
 
 (defun kubel-get-resource-details (&optional describe)
   "Get the details of the resource under the cursor.
@@ -1284,6 +1397,76 @@ RESET is to be called if the search is nil after the first attempt."
   (interactive)
   (kubel--show-rollout-revision kubel-resource (kubel--get-resource-under-cursor)))
 
+(defun kubel--is-rollout-view ()
+  "Return non-nil if the resource supports kubectl rollout."
+  (or (kubel--is-deployment-view)
+      (-contains? '("DaemonSets" "daemonsets" "daemonsets.apps") kubel-resource)
+      (-contains? '("StatefulSets" "statefulsets" "statefulsets.apps") kubel-resource)))
+
+(defun kubel--rollout-targets ()
+  "Return the type/name of the marked or current resources for kubectl rollout.
+Prompt for a deployment if the resource doesn't support rollouts."
+  (if (kubel--is-rollout-view)
+      (mapcar (lambda (name) (format "%s/%s" kubel-resource name))
+              (kubel--marked-or-current-items))
+    (list (format "deployments/%s" (kubel--select-resource "Deployments")))))
+
+(defun kubel--rollout (action &optional args)
+  "Run kubectl rollout ACTION with ARGS on the rollout targets."
+  (dolist (target (kubel--rollout-targets))
+    (kubel--exec-async (format "kubel - rollout %s - %s" action target)
+                       (append (list "rollout" action target) args) t)))
+
+(defun kubel-rollout-status ()
+  "Watch the rollout status of the marked or current resources."
+  (interactive)
+  (kubel--rollout "status"))
+
+(defun kubel-rollout-restart ()
+  "Restart the marked or current resources."
+  (interactive)
+  (kubel--rollout "restart"))
+
+(defun kubel-rollout-undo ()
+  "Roll back the resource under cursor to a selected revision."
+  (interactive)
+  (let* ((target (car (kubel--rollout-targets)))
+         (revision (car (split-string (kubel--select-rollout target)))))
+    (when (y-or-n-p (format "Roll back %s to revision %s? " target revision))
+      (kubel--exec-async (format "kubel - rollout undo - %s" target)
+                         (list "rollout" "undo" target (format "--to-revision=%s" revision)) t))))
+
+(defun kubel-rollout-pause ()
+  "Pause the rollout of the marked or current resources."
+  (interactive)
+  (kubel--rollout "pause"))
+
+(defun kubel-rollout-resume ()
+  "Resume the rollout of the marked or current resources."
+  (interactive)
+  (kubel--rollout "resume"))
+
+(defun kubel-set-image ()
+  "Set the image of a container of the resource under cursor."
+  (interactive)
+  (let* ((target (if (kubel--is-pod-view)
+                     (format "pods/%s" (kubel--get-resource-under-cursor))
+                   (car (kubel--rollout-targets))))
+         (path (if (kubel--is-pod-view) ".spec.containers" ".spec.template.spec.containers"))
+         (containers (mapcar (lambda (line) (split-string line "="))
+                             (split-string
+                              (kubel--exec-sync
+                               (format "%s get %s -o jsonpath='{range %s[*]}{.name}={.image}{\"\\n\"}{end}'"
+                                       (kubel--get-command-prefix) target path))
+                              "\n" t)))
+         (container (if (equal (length containers) 1)
+                        (caar containers)
+                      (completing-read "Select container: " (mapcar #'car containers) nil t)))
+         (image (read-string (format "Image for %s: " container)
+                             (cadr (assoc container containers)))))
+    (kubel--exec-async (format "kubel - set image - %s" target)
+                       (list "set" "image" target (format "%s=%s" container image)) t)))
+
 (defun kubel-changelog ()
   "Opens up the changelog."
   (interactive)
@@ -1350,7 +1533,7 @@ RESET is to be called if the search is nil after the first attempt."
          (other-name (buffer-name other-buffer))
          (buffers))
     (dolist (buf (buffer-list))
-      (when (string-prefix-p "*kubel:" (buffer-name buf))
+      (when (with-current-buffer buf (derived-mode-p 'kubel-mode))
         (push buf buffers)))
     (let ((predicate
            (lambda (buffer)
@@ -1391,6 +1574,16 @@ When called interactively, prompts for a buffer belonging to kubel."
    ("i" "Tail initContainer logs" kubel-get-pod-logs--initContainer)
    ("L" "Tail by labels" kubel-get-logs-by-labels)])
 
+(transient-define-prefix kubel-rollout-popup ()
+  "Kubel Rollout Menu"
+  ["Actions"
+   ("h" "History" kubel-rollout-history)
+   ("s" "Status" kubel-rollout-status)
+   ("r" "Restart" kubel-rollout-restart)
+   ("u" "Undo to revision" kubel-rollout-undo)
+   ("p" "Pause" kubel-rollout-pause)
+   ("P" "Resume" kubel-rollout-resume)])
+
 (transient-define-prefix kubel-copy-popup ()
   "Kubel Copy Menu"
   ["Actions"
@@ -1422,7 +1615,8 @@ When called interactively, prompts for a buffer belonging to kubel."
     ("g" "Refresh" kubel-refresh)
     ("b" "Buffers" kubel-switch-to-buffer)
     ("k" "Delete" kubel-delete-popup)
-    ("r" "Rollout" kubel-rollout-history)]
+    ("r" "Rollout..." kubel-rollout-popup)
+    ("I" "Set image" kubel-set-image)]
    ["" ;; based on current view
     ("p" "Port forward" kubel-port-forward-pod)
     ("l" "Logs" kubel-log-popup)
@@ -1466,7 +1660,8 @@ When called interactively, prompts for a buffer belonging to kubel."
     (define-key map (kbd "R") 'kubel-set-resource)
     (define-key map (kbd "k") 'kubel-delete-popup)
     (define-key map (kbd "f") 'kubel-set-filter)
-    (define-key map (kbd "r") 'kubel-rollout-history)
+    (define-key map (kbd "r") 'kubel-rollout-popup)
+    (define-key map (kbd "I") 'kubel-set-image)
     (define-key map (kbd "E") 'kubel-quick-edit)
     (define-key map (kbd "M-n") 'kubel-jump-to-next-highlight)
     (define-key map (kbd "M-p") 'kubel-jump-to-previous-highlight)
@@ -1516,7 +1711,7 @@ DIRECTORY is optional for TRAMP support."
           (kill-buffer (get-buffer name))))
     (rename-buffer name)
     (message (format "Running kubectl for: %s..." name)))
-  (let ((entries (kubel--populate-list)))
+  (let ((entries (funcall kubel--populate-function)))
     (setq tabulated-list-format (car entries))
     (setq tabulated-list-entries (cadr entries)))   ; TODO handle "No resource found"
   (setq tabulated-list-sort-key kubel--list-sort-key)
@@ -1547,6 +1742,39 @@ DIRECTORY is optional for TRAMP support."
         (setq kubel-resource resource)
         (pop-to-buffer-same-window tmpname)
         (kubel-refresh directory)))))
+
+(defvar-local kubel--kubernetes-context-p t
+  "Non-nil if `kubel-context' and `kubel-namespace' are kubectl ones.
+Nil in modes, like talos, which use them for something else.")
+
+(defun kubel--open-in-mode (mode resource &optional init namespace)
+  "Show RESOURCE in a buffer using MODE, a mode derived from `kubel-mode'.
+Context and namespace are inherited from the current kubel buffer
+when it uses kubectl ones, otherwise initialized by calling INIT,
+which defaults to `kubel--init-context'.
+If NAMESPACE is non-nil, it is used instead."
+  (let* ((inherit (and (derived-mode-p 'kubel-mode) kubel--kubernetes-context-p))
+         (ctx (when inherit kubel-context))
+         (ns (when inherit kubel-namespace))
+         (dir default-directory)
+         (buf (generate-new-buffer "*kubel-tmp*"))
+         (name (with-current-buffer buf
+                 (funcall mode)
+                 (setq default-directory dir)
+                 (if (and ctx kubel--kubernetes-context-p)
+                     (setq kubel-context ctx
+                           kubel-namespace ns)
+                   (funcall (or init #'kubel--init-context)))
+                 (when namespace
+                   (setq kubel-namespace namespace))
+                 (setq kubel-resource resource)
+                 (kubel--buffer-name))))
+    (if (get-buffer name)
+        (progn
+          (kill-buffer buf)
+          (pop-to-buffer-same-window name))
+      (pop-to-buffer-same-window buf)
+      (kubel-refresh))))
 
 (defun kubel--init-context ()
   "Initialize context and namespace if not already set.

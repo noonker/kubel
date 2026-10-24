@@ -17,12 +17,12 @@ steps: &steps
     - run:
         name: Compile
         command: |
-          emacs -Q --batch -l .circleci/make.el --funcall make-compile kubel.el
+          emacs -Q --batch -l .circleci/make.el --funcall make-compile kubel.el kubel-argo.el kubel-cilium.el kubel-virtctl.el kubel-talos.el kubel-helm.el
 
     - run:
         name: Lint
         command: |
-          emacs -Q --batch -l .circleci/make.el --funcall make-lint kubel.el
+          emacs -Q --batch -l .circleci/make.el --funcall make-lint kubel.el kubel-argo.el kubel-cilium.el kubel-virtctl.el kubel-talos.el kubel-helm.el
 
 jobs:
   emacs-29:

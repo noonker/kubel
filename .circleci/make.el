@@ -16,12 +16,14 @@
 
 (defun make-ert ()
   (make-init)
+  (add-to-list 'load-path "/kubel")
   (load-file "/kubel/kubel.el")
   (load-file "/kubel/test/kubel-test.el")
   (ert-run-tests-batch-and-exit))
 
 (defun make-compile ()
   (make-init)
+  (add-to-list 'load-path "/kubel")
   (setq byte-compile-error-on-warn nil)
   (batch-byte-compile))
 

@@ -2,8 +2,24 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Added
+- `kubel-argo`: Argo Workflows porcelain (workflows, cron workflows, templates; logs, submit, retry, stop...)
+- `kubel-cilium`: Cilium porcelain (Cilium resources, status/diagnostics popup, hubble observe)
+- `kubel-virtctl`: KubeVirt porcelain (VM lifecycle, serial console/ssh/vnc, guest info, port forward)
+- `kubel-helm`: Helm porcelain (releases; values/manifest/notes, history, rollback, upgrade, diff, uninstall)
+- Rollout popup on `r`: history, status, restart, undo to revision, pause, resume
+- `kubel-set-image` on `I` to change the image of a container
+- `kubectl diff` shown before applying an edited resource, see `kubel-diff-before-apply`
+- `kubel-talos`: Talos Linux porcelain (services, containers, processes, any Talos resource; logs, dmesg, dashboard...)
+- `kubel--exec-program-async` to run other CLIs than kubectl (with an optional process filter, see `kubel--ansi-color-filter`), and `kubel--populate-function` for modes derived from `kubel-mode`
+
+### Fixed
+- Async command callbacks now run in the command output buffer
+- Rollout history callback was evaluated instead of being passed as a function
+- No more "buffer has a running process" prompt for the stderr pipe when killing a streaming command such as `logs -f`
+
+### Planned
 - more unit tests
-- show diff and confirmation before applying a change
 - easily get logs for a previous pod instance
 - top po command + sort by usage
 - safe way to help with rollbacks?

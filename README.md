@@ -5,6 +5,12 @@
 
 Emacs extension for controlling Kubernetes with limited permissions.
 
+> **Note:** this is a vibecoded fork of [abrochard/kubel](https://github.com/abrochard/kubel),
+> largely written with an AI coding assistant. On top of upstream kubel it adds
+> porcelains for Argo Workflows, Cilium/Hubble, KubeVirt (virtctl), Talos
+> (talosctl) and Helm, plus rollout, set image and diff before apply commands.
+> See [Other tools](#other-tools).
+
 ![screenshot](screenshot.png)
 
 You can [watch how kubel started](https://www.youtube.com/watch?v=w3krYEeqnyk) or [read about it](https://gist.github.com/abrochard/dd610fc4673593b7cbce7a0176d897de).
@@ -29,7 +35,21 @@ We now support managing pretty much any resource!
 
 ## Installation
 
-Get it from Melpa, or copy and load the `kubel.el` file.
+To use this fork with [straight.el](https://github.com/radian-software/straight.el):
+
+```elisp
+(straight-use-package
+ '(kubel :type git :host github :repo "noonker/kubel"))
+```
+
+Or with `use-package`:
+
+```elisp
+(use-package kubel
+  :straight (:host github :repo "noonker/kubel"))
+```
+
+Upstream kubel is on Melpa, or copy and load the `kubel.el` file.
 
 If you want to have the evil compatibility package, get it from Melpa as well or
 load the `kubel-evil.el` file.
@@ -94,7 +114,8 @@ h => help popup
 E => quick edit any resource
 g => refresh
 k => delete popup
-r => see the rollout history for resource
+r => rollout popup (history, status, restart, undo to revision, pause, resume)
+I => set the image of a container
 p => port forward pod
 l => log popup
 e => exec popup
@@ -120,10 +141,92 @@ s => show only resources with specified label value
 ## Editing a resource
 
 After describing a resource in YAML format, you can edit the buffer and hit `C-c C-c` to apply your changes.
+The `kubectl diff` with the live resource is shown before confirming, set
+`kubel-diff-before-apply` to nil to skip it.
 
 For example, if you want to edit a deployment, you can switch the resource with `R` and select "Deployments", then press return with the cursor on the row you wish to edit, edit the buffer, and hit `C-c C-c` to apply.
 
 Alternatively, you can hit `E` to then select the resource type and the resource name of what you want to edit.
+
+## Other tools
+
+Kubel also ships porcelains for tools of the Kubernetes ecosystem. Each one is a
+separate file, opens a kubel-style buffer that supports the usual marking (`m`,
+`u`, `M`, `U`), filtering (`f`), context (`C`), namespace (`n`), buffer (`b`) and
+process buffer (`$`) commands, and has its own help popup on `h` / `?`. When
+called from a kubel buffer, they reuse its context and namespace.
+
+```elisp
+(require 'kubel-argo)    ; M-x kubel-argo
+(require 'kubel-cilium)  ; M-x kubel-cilium
+(require 'kubel-virtctl) ; M-x kubel-virtctl
+(require 'kubel-talos)   ; M-x kubel-talos
+(require 'kubel-helm)    ; M-x kubel-helm
+```
+
+They are autoloaded when installed as a package, so the `require`s are only
+needed when loading the files by hand.
+
+### Argo Workflows (`kubel-argo`, requires `argo`)
+```
+R => switch between workflows, cron workflows, templates and cluster templates
+enter => argo get (C-u for yaml)
+a => actions popup: retry, resubmit, stop, terminate, suspend, resume, submit from cron/template
+l => log popup (follow, tail, container, grep, since)
+w => watch workflow
+k => delete popup
+```
+
+### Cilium (`kubel-cilium`, requires `cilium`, optionally `hubble`)
+Lists Cilium endpoints by default.
+```
+R => switch to another cilium.io resource (policies, nodes, identities...)
+a => cilium popup: status, features, config, version, BGP peers/routes,
+     ClusterMesh and encryption status, connectivity test, sysdump, hubble UI
+o => hubble observe popup for the pod under cursor, the namespace, or the cluster
+```
+Hubble connects to the relay of the buffer context through its own port-forward
+(`-P`, on by default). Turn it off to use an already running
+`cilium hubble port-forward` or the server configured for `hubble`.
+
+### KubeVirt (`kubel-virtctl`, requires `virtctl`)
+Lists virtual machines by default.
+```
+R => switch to another kubevirt.io resource (VMIs, data volumes, migrations...)
+a => lifecycle popup: start, stop, restart, soft reboot, pause, unpause, migrate
+e => console popup: serial console, ssh, vnc
+i => guest info popup: OS info, filesystems, users, object graph
+p => port forward VM
+```
+
+### Talos Linux (`kubel-talos`, requires `talosctl`)
+In talos buffers the context is the talosctl context and the namespace is the
+list of target nodes (empty to use the nodes of the talosconfig). Lists services by default.
+```
+R => switch to containers, k8s containers, processes or any `talosctl get rd` resource
+enter => service status / resource yaml (C-u for json) / container logs
+l => log popup for the service or container under cursor
+S => service popup: start, stop, restart
+a => node popup: dashboard, health, dmesg, events, version, memory, mounts,
+     etcd members/status, reboot, shutdown
+C => set talos context
+n => set nodes
+K => set talosconfig file
+```
+
+### Helm (`kubel-helm`, requires `helm`)
+Lists the releases of all namespaces by default.
+```
+enter => user supplied values (C-u for all computed values)
+v => get popup: values, manifest, notes, hooks, status, all
+r => history popup: history, rollback to a selected revision
+a => upgrade popup: reuse values (default) or values file, chart version,
+     server dry run, wait, atomic; diff with the helm-diff plugin
+k => uninstall popup (dry run, keep history)
+G => helm repo update
+n => set namespace, or *all*
+```
+Upgrades prompt for the chart, defaulting to the repo chart matching the release.
 
 ## Customize
 
