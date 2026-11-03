@@ -98,6 +98,115 @@
   (should (equal '("--values=/tmp/v.yaml") (kubel-helm--upgrade-args '("--values=/tmp/v.yaml"))))
   (should (equal '("--reset-then-reuse-values") (kubel-helm--upgrade-args '("--reset-then-reuse-values")))))
 
+;; calico
+
+(require 'kubel-calico)
+(require 'kubel-sops)
+(require 'kubel-kustomize)
+
+(ert-deftest kubel--test-calico-normalize-table ()
+  ;; a header ending with spaces would be a column, an empty line a row
+  (let ((entrylist (kubel--parse-body
+                    (kubel-calico--normalize-table
+                     "NAME   ASN   IPV4   IPV6   \nnode-a                    \nnode-b 64512\n\n"))))
+    (should (equal '("NAME" "ASN" "IPV4" "IPV6") (car entrylist)))
+    (should (= 3 (length entrylist)))
+    (should (equal "node-a" (car (nth 1 entrylist))))))
+
+(ert-deftest kubel--test-calico-populate ()
+  (with-temp-buffer
+    (kubel-calico-mode)
+    (setq kubel-context "ctx" kubel-namespace "kube-system" kubel-resource "workloadendpoints")
+    (cl-letf (((symbol-function 'kubel--exec-sync)
+               (lambda (cmd &rest _)
+                 (should (equal "calicoctl --context ctx get workloadendpoints --namespace kube-system -o wide" cmd))
+                 (concat "NAMESPACE     NAME      WORKLOAD   NODE     \n"
+                         "kube-system   wep-one   pod-one    node-a   \n\n"))))
+      (let ((result (kubel-calico--populate-list)))
+        (should (equal "wep-one" (caar (cadr result))))
+        (should (equal "kube-system" (aref (cadr (car (cadr result))) 1)))))))
+
+(ert-deftest kubel--test-calico-list-command-scope ()
+  (with-temp-buffer
+    (kubel-calico-mode)
+    (setq kubel-context "ctx" kubel-namespace "default" kubel-resource "nodes")
+    ;; calicoctl fails with -n on a cluster scoped resource
+    (should (equal "calicoctl --context ctx get nodes -o wide" (kubel-calico--list-command)))
+    (setq kubel-resource "networkpolicies" kubel-namespace "")
+    (should (equal "calicoctl --context ctx get networkpolicies --all-namespaces -o wide"
+                   (kubel-calico--list-command)))
+    (setq kubel-resource "profiles")
+    (should (equal "calicoctl --context ctx get profiles" (kubel-calico--list-command)))))
+
+(ert-deftest kubel--test-calico-ambiguous-name ()
+  (with-temp-buffer
+    (kubel-calico-mode)
+    (setq kubel-resource "networkpolicies" kubel-namespace ""
+          tabulated-list-format [("NAME" 5 t) ("NAMESPACE" 5 t)]
+          tabulated-list-entries '(("dup" ["dup" "a"]) ("dup" ["dup" "b"]) ("one" ["one" "c"]))
+          kubel--selected-items '("dup" "one"))
+    (should (equal "c" (kubel-calico--item-namespace "one")))
+    (should-error (kubel-calico--item-namespace "dup") :type 'user-error)))
+
+;; sops
+
+(ert-deftest kubel--test-sops-file-listing ()
+  (let* ((dir (file-name-as-directory (make-temp-file "kubel-test" t)))
+         (default-directory dir))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" dir))
+          (make-directory (expand-file-name "sub" dir))
+          (dolist (file '(".git/config.yaml" ".sops.yaml" "notes.txt" "plain.yaml" "sub/enc.yaml"))
+            (write-region (if (equal file "sub/enc.yaml") "a: ENC[x]\nsops:\n  version: 3\n" "a: 1\n")
+                          nil (expand-file-name file dir)))
+          (with-temp-buffer
+            (kubel-sops-mode)
+            (setq kubel-resource dir)
+            (cl-letf (((symbol-function 'process-file)
+                       (lambda (_program _infile _buffer _display &rest args)
+                         (should (equal '("filestatus" "enc.yaml") args))
+                         (insert "{\"encrypted\":true}")
+                         0)))
+              (let ((entries (cadr (kubel-sops--populate-list))))
+                (should (equal '("plain.yaml" "sub/enc.yaml") (mapcar #'car entries)))
+                (should (equal "plain" (aref (cadr (nth 0 entries)) 1)))
+                (should (equal "encrypted" (aref (cadr (nth 1 entries)) 1)))))))
+      (delete-directory dir t))))
+
+(ert-deftest kubel--test-sops-plaintext-buffer-protection ()
+  (let* ((kubel-sops--edit-directories (list (file-truename (file-name-as-directory temporary-file-directory))))
+         (file (make-temp-file "kubel-test")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq buffer-file-name file)
+          (auto-save-mode 1)
+          (kubel-sops--protect-plaintext)
+          (should backup-inhibited)
+          (should-not buffer-auto-save-file-name))
+      (delete-file file))))
+
+;; kustomize
+
+(ert-deftest kubel--test-kustomize-listing-and-args ()
+  (let ((dir (file-name-as-directory (make-temp-file "kubel-test" t))))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "overlay" dir))
+          (write-region "resources: []\n" nil (expand-file-name "kustomization.yaml" dir))
+          (write-region "namespace: prod # comment\nnamePrefix: a-\n" nil
+                        (expand-file-name "overlay/Kustomization" dir))
+          (with-temp-buffer
+            (kubel-kustomize-mode)
+            (setq kubel-resource dir)
+            (let ((entries (cadr (kubel-kustomize--populate-list))))
+              (should (equal '("./" "overlay/") (mapcar (lambda (e) (file-name-as-directory (car e))) entries)))
+              (should (equal "prod" (aref (cadr (nth 1 entries)) 1)))
+              (should (equal "a-" (aref (cadr (nth 1 entries)) 2))))))
+      (delete-directory dir t)))
+  (should (equal '("--enable-helm")
+                 (kubel-kustomize--build-args '("--enable-helm" "--server-side" "--dry-run=server")))))
+
 ;; (ert "kubel--test-.*")
 
 (provide 'kubel-test)

@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 - `kubel-cilium`: Cilium porcelain (Cilium resources, status/diagnostics popup, hubble observe)
 - `kubel-virtctl`: KubeVirt porcelain (VM lifecycle, serial console/ssh/vnc, guest info, port forward)
 - `kubel-helm`: Helm porcelain (releases; values/manifest/notes, history, rollback, upgrade, diff, uninstall)
+- `kubel-calico`: Calico porcelain (resources; get, edit and apply, delete, label, IPAM, diagnostics)
+- `kubel-sops`: SOPS porcelain (files of a directory; decrypt, edit, encrypt, rotate, update keys, set/unset, apply to the cluster)
+- `kubel-kustomize`: Kustomize porcelain (kustomizations of a directory; build, apply, diff, delete, edit set/add/remove/fix, create)
 - Rollout popup on `r`: history, status, restart, undo to revision, pause, resume
 - `kubel-set-image` on `I` to change the image of a container
 - `kubectl diff` shown before applying an edited resource, see `kubel-diff-before-apply`

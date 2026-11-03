@@ -678,6 +678,57 @@ Used for interactive commands such as consoles and dashboards."
       (term-char-mode))
     (pop-to-buffer-same-window buf)))
 
+;; Helpers for porcelains working on local files.
+
+(defconst kubel--skipped-directories '(".git" ".terraform" "node_modules" "vendor")
+  "Directories `kubel--directory-files-recursively' doesn't descend into.")
+
+(defun kubel--directory-files-recursively (directory predicate)
+  "Return the sorted files of DIRECTORY for which PREDICATE is non-nil.
+PREDICATE is called with the absolute file name.  Symbolic links to
+directories and `kubel--skipped-directories' are not followed."
+  (let (result)
+    (dolist (file (directory-files directory t directory-files-no-dot-files-regexp))
+      (cond ((file-directory-p file)
+             (unless (or (file-symlink-p file)
+                         (member (file-name-nondirectory file) kubel--skipped-directories))
+               (setq result (nconc (reverse (kubel--directory-files-recursively file predicate))
+                                   result))))
+            ((funcall predicate file) (push file result))))
+    (sort result #'string<)))
+
+(defun kubel--refresh-callback (list-buffer)
+  "Return a callback refreshing LIST-BUFFER after a command changed something.
+A command without output doesn't leave its empty buffer on screen."
+  (lambda ()
+    (when (buffer-live-p list-buffer)
+      (with-current-buffer list-buffer (kubel-refresh))
+      (when (and (= (buffer-size) 0)
+                 (not (eq (current-buffer) list-buffer))
+                 (eq (window-buffer) (current-buffer)))
+        (let ((output (current-buffer)))
+          (switch-to-buffer list-buffer)
+          (kill-buffer output))))))
+
+(defun kubel--exec-pipe-to-kubectl (process-name source args &optional callback)
+  "Pipe the output of the shell command SOURCE into kubectl with ARGS.
+PROCESS-NAME and CALLBACK are as in `kubel--exec-program-async'.  Only
+the context is passed to kubectl: manifests name their own namespace,
+and kubectl refuses those which differ from its namespace argument.
+Return the process."
+  (let ((process-connection-type nil))
+    (kubel--exec-program-async
+     process-name "sh" nil
+     (list "-c"
+           (concat source " | "
+                   (mapconcat #'shell-quote-argument
+                              (append (list kubel-kubectl)
+                                      (unless (member kubel-context '(nil ""))
+                                        (list "--context" kubel-context))
+                                      args)
+                              " ")))
+     t callback)))
+
 (defun kubel--marked-or-current-items ()
   "Return the marked items, or a list of the item under cursor."
   (if (kubel--items-selected-p)

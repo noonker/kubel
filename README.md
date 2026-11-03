@@ -8,7 +8,7 @@ Emacs extension for controlling Kubernetes with limited permissions.
 > **Note:** this is a vibecoded fork of [abrochard/kubel](https://github.com/abrochard/kubel),
 > largely written with an AI coding assistant. On top of upstream kubel it adds
 > porcelains for Argo Workflows, Cilium/Hubble, KubeVirt (virtctl), Talos
-> (talosctl) and Helm, plus rollout, set image and diff before apply commands.
+> (talosctl), Helm, Calico (calicoctl), SOPS and Kustomize, plus rollout, set image and diff before apply commands.
 > See [Other tools](#other-tools).
 
 ![screenshot](screenshot.png)
@@ -162,6 +162,9 @@ called from a kubel buffer, they reuse its context and namespace.
 (require 'kubel-virtctl) ; M-x kubel-virtctl
 (require 'kubel-talos)   ; M-x kubel-talos
 (require 'kubel-helm)    ; M-x kubel-helm
+(require 'kubel-calico)  ; M-x kubel-calico
+(require 'kubel-sops)    ; M-x kubel-sops
+(require 'kubel-kustomize) ; M-x kubel-kustomize
 ```
 
 They are autoloaded when installed as a package, so the `require`s are only
@@ -227,6 +230,68 @@ G => helm repo update
 n => set namespace, or *all*
 ```
 Upgrades prompt for the chart, defaulting to the repo chart matching the release.
+
+### Calico (`kubel-calico`, requires `calicoctl`)
+Lists Calico nodes by default. Uses the default Kubernetes API datastore, set
+`DATASTORE_TYPE` or `/etc/calico/calicoctl.cfg` to use another one. Set
+`kubel-calico-allow-version-mismatch` if your `calicoctl` differs from the cluster.
+```
+R => switch to another Calico resource (IP pools, BGP peers, policies, workload endpoints...)
+enter => calicoctl get -o yaml (C-u for json)
+E => edit the resource, C-c C-c to calicoctl apply it
+a => calico popup: IPAM show, check and release, version, cluster diagnostics, label,
+     apply or validate a file, node status and check system
+k => delete popup
+n => set namespace, empty for all namespaces (namespaced resources only)
+```
+Node status and check system are about the host running Emacs, not the cluster.
+
+### SOPS (`kubel-sops`, requires `sops`)
+Prompts for a directory and lists its yaml, json, env, ini and enc files with their
+encryption status, see `kubel-sops-file-regexp`. Commands run from the directory of
+the file, so that the closest `.sops.yaml` applies.
+```
+enter => view the decrypted file
+d => decrypt popup: view, extract a key, to a file, in place
+e => edit the file in this Emacs, C-x # when done
+E => encrypt popup: keys (default to .sops.yaml), what to encrypt
+r => rotate popup: new data key, add or remove master keys
+K => update the keys from .sops.yaml, sops asks for confirmation in a terminal
+s => set a value (C-u for raw JSON)
+x => unset a value
+o => open the .sops.yaml which applies to the file
+A => apply popup: apply the decrypted file to the cluster of the buffer
+D => diff the decrypted file with the cluster
+R => set directory
+```
+`e` starts the Emacs server if needed, and runs `sops edit` with `emacsclient` as its
+editor. Backups and auto-save are turned off for the temporary plaintext file, which
+is removed when done. Set `kubel-sops-editor` to use another editor in a terminal
+instead, it is then up to this editor to keep the plaintext safe. `e` and `K` only
+work on local files.
+
+Set values are read without echo and go through stdin. Decrypted buffers aren't
+visiting files, `Q` kills them along with the other kubel buffers.
+
+### Kustomize (`kubel-kustomize`, requires `kustomize`)
+Prompts for a directory and lists the kustomizations below it.
+```
+enter => kustomize build
+a => build popup: helm, plugins, exec functions, load restrictor; build, to a file, tree;
+     apply, diff, delete with server side, force conflicts and server dry run
+A => apply to the cluster of the buffer
+D => diff with the cluster
+k => delete from the cluster
+e => open the kustomization file
+s => edit set popup: image, namespace, name prefix and suffix, replicas, label, annotation
++ => edit add popup: resource, component, patch, configmap, secret, label, annotation
+- => edit remove popup
+F => edit fix
+c => create a kustomization, detecting the resources of a directory
+R => set directory
+```
+Only the context of the buffer is passed to `kubectl`, the namespace comes from the
+manifests, like with `kubectl apply -k`.
 
 ## Customize
 
